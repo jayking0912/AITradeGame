@@ -10,6 +10,7 @@ from market_data import MarketDataFetcher
 from ai_trader import AITrader
 from database import Database
 from version import __version__, __github_owner__, __repo__, GITHUB_REPO_URL, LATEST_RELEASE_URL
+from exchange_service import ExchangeCredentials, create_exchange_client, ExchangeClientError
 
 app = Flask(__name__)
 CORS(app)
@@ -19,6 +20,70 @@ market_fetcher = MarketDataFetcher()
 trading_engines = {}
 auto_trading = True
 TRADE_FEE_RATE = 0.001  # 默认交易费率
+DEFAULT_MAX_LEVERAGE = 20
+
+
+def _build_trading_engine(model: dict) -> TradingEngine:
+    """Instantiate a trading engine for a given model configuration."""
+    provider = db.get_provider(model['provider_id'])
+    if not provider:
+        raise ValueError('Provider not found for model')
+
+    ai_trader = AITrader(
+        api_key=model['api_key'],
+        api_url=model['api_url'],
+        model_name=model['model_name']
+    )
+
+    trading_mode = (model.get('trading_mode') or 'manual').lower()
+    quote_currency = (model.get('exchange_quote_currency') or 'USDT').upper()
+    fee_rate = TRADE_FEE_RATE
+    exchange_client = None
+
+    if trading_mode == 'exchange':
+        credentials = ExchangeCredentials(
+            name=model.get('exchange_name') or '',
+            api_key=model.get('exchange_api_key') or '',
+            api_secret=model.get('exchange_api_secret') or '',
+            passphrase=model.get('exchange_passphrase'),
+            use_sandbox=bool(model.get('exchange_use_sandbox')),
+            account_type=model.get('exchange_type'),
+            quote_currency=quote_currency
+        )
+
+        exchange_client = create_exchange_client(credentials)
+
+        # Refresh fee rate if not cached
+        try:
+            if model.get('exchange_fee_rate') is not None:
+                fee_rate = float(model['exchange_fee_rate'])
+            else:
+                fee_rate = exchange_client.get_taker_fee(f"BTC/{quote_currency}")
+                db.update_model_exchange_info(model['id'], fee_rate=fee_rate)
+        except ExchangeClientError as exc:
+            print(f"[WARN] Failed to fetch fee rate for model {model['id']}: {exc}")
+
+        # Persist latest balance snapshot
+        try:
+            snapshot = exchange_client.get_balance_snapshot()
+            total_balance = snapshot.get('total') or (
+                (snapshot.get('free') or 0) + (snapshot.get('used') or 0)
+            )
+            db.update_model_exchange_info(model['id'], last_balance=total_balance)
+        except ExchangeClientError as exc:
+            print(f"[WARN] Failed to fetch balance for model {model['id']}: {exc}")
+
+    return TradingEngine(
+        model_id=model['id'],
+        db=db,
+        market_fetcher=market_fetcher,
+        ai_trader=ai_trader,
+        trade_fee_rate=fee_rate,
+        trading_mode=trading_mode,
+        exchange_client=exchange_client,
+        quote_currency=quote_currency,
+        default_max_leverage=DEFAULT_MAX_LEVERAGE
+    )
 
 @app.route('/')
 def index():
@@ -114,30 +179,93 @@ def get_models():
 def add_model():
     data = request.json
     try:
-        # Get provider info
         provider = db.get_provider(data['provider_id'])
         if not provider:
             return jsonify({'error': 'Provider not found'}), 404
+
+        trading_mode = (data.get('trading_mode') or 'manual').lower()
+        exchange_name = data.get('exchange_name')
+        exchange_type = data.get('exchange_type')
+        exchange_api_key = data.get('exchange_api_key')
+        exchange_api_secret = data.get('exchange_api_secret')
+        exchange_passphrase = data.get('exchange_passphrase')
+        exchange_use_sandbox = bool(data.get('exchange_use_sandbox', False))
+        exchange_quote_currency = (data.get('exchange_quote_currency') or 'USDT').upper()
+
+        initial_capital = float(data.get('initial_capital', 100000))
+        exchange_last_balance = None
+        exchange_fee_rate = None
+
+        if trading_mode == 'exchange':
+            if not exchange_name:
+                return jsonify({'error': 'Exchange name is required for exchange mode'}), 400
+            if not exchange_api_key or not exchange_api_secret:
+                return jsonify({'error': 'Exchange API key and secret are required'}), 400
+
+            credentials = ExchangeCredentials(
+                name=exchange_name,
+                api_key=exchange_api_key,
+                api_secret=exchange_api_secret,
+                passphrase=exchange_passphrase,
+                use_sandbox=exchange_use_sandbox,
+                account_type=exchange_type,
+                quote_currency=exchange_quote_currency
+            )
+            try:
+                exchange_client = create_exchange_client(credentials)
+            except ExchangeClientError as exc:
+                return jsonify({'error': f'Exchange connection failed: {exc}'}), 400
+
+            try:
+                balance_snapshot = exchange_client.get_balance_snapshot()
+                exchange_last_balance = balance_snapshot.get('total') or (
+                    (balance_snapshot.get('free') or 0) + (balance_snapshot.get('used') or 0)
+                )
+                if exchange_last_balance is not None:
+                    initial_capital = float(exchange_last_balance)
+            except ExchangeClientError as exc:
+                exchange_client.close()
+                return jsonify({'error': f'Failed to fetch exchange balance: {exc}'}), 400
+
+            try:
+                exchange_fee_rate = exchange_client.get_taker_fee(f"BTC/{exchange_quote_currency}")
+            except ExchangeClientError as exc:
+                print(f"[WARN] Unable to fetch exchange fee rate: {exc}")
+            finally:
+                exchange_client.close()
+        else:
+            # Ensure manual mode uses default settings
+            exchange_name = None
+            exchange_type = None
+            exchange_api_key = None
+            exchange_api_secret = None
+            exchange_passphrase = None
+            exchange_use_sandbox = False
+            exchange_quote_currency = 'USDT'
 
         model_id = db.add_model(
             name=data['name'],
             provider_id=data['provider_id'],
             model_name=data['model_name'],
-            initial_capital=float(data.get('initial_capital', 100000))
+            initial_capital=initial_capital,
+            trading_mode=trading_mode,
+            exchange_name=exchange_name,
+            exchange_type=exchange_type,
+            exchange_api_key=exchange_api_key,
+            exchange_api_secret=exchange_api_secret,
+            exchange_passphrase=exchange_passphrase,
+            exchange_use_sandbox=exchange_use_sandbox,
+            exchange_quote_currency=exchange_quote_currency,
+            exchange_last_balance=exchange_last_balance,
+            exchange_fee_rate=exchange_fee_rate
         )
 
         model = db.get_model(model_id)
-        trading_engines[model_id] = TradingEngine(
-            model_id=model_id,
-            db=db,
-            market_fetcher=market_fetcher,
-            ai_trader=AITrader(
-                api_key=model['api_key'],
-                api_url=model['api_url'],
-                model_name=model['model_name']
-            ),
-            trade_fee_rate=TRADE_FEE_RATE  # 新增：传入费率
-        )
+        try:
+            trading_engines[model_id] = _build_trading_engine(model)
+        except Exception as exc:
+            print(f"[ERROR] Failed to initialize engine for model {model_id}: {exc}")
+            return jsonify({'error': f'Engine initialization failed: {exc}'}), 500
         print(f"[INFO] Model {model_id} ({data['name']}) initialized")
 
         return jsonify({'id': model_id, 'message': 'Model added successfully'})
@@ -154,7 +282,12 @@ def delete_model(model_id):
         
         db.delete_model(model_id)
         if model_id in trading_engines:
-            del trading_engines[model_id]
+            engine = trading_engines.pop(model_id)
+            try:
+                if engine.exchange_client:
+                    engine.exchange_client.close()
+            except Exception as exc:
+                print(f"[WARN] Failed to close exchange client for model {model_id}: {exc}")
         
         print(f"[INFO] Model {model_id} ({model_name}) deleted")
         return jsonify({'message': 'Model deleted successfully'})
@@ -168,6 +301,47 @@ def get_portfolio(model_id):
     current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
     
     portfolio = db.get_portfolio(model_id, current_prices)
+    model = db.get_model(model_id)
+
+    if model and (model.get('trading_mode') or 'manual').lower() == 'exchange':
+        engine = trading_engines.get(model_id)
+        if engine and engine.exchange_client:
+            try:
+                snapshot = engine.exchange_client.get_balance_snapshot()
+                available_cash = snapshot.get('available') or snapshot.get('free', 0)
+                portfolio['exchange_balance'] = snapshot
+                portfolio['exchange_available_cash'] = available_cash
+                portfolio['cash'] = min(portfolio.get('cash', available_cash), available_cash)
+            except ExchangeClientError as exc:
+                portfolio['exchange_balance_error'] = str(exc)
+        else:
+            # Fallback: fetch snapshot using a temporary client
+            credentials = ExchangeCredentials(
+                name=model.get('exchange_name') or '',
+                api_key=model.get('exchange_api_key') or '',
+                api_secret=model.get('exchange_api_secret') or '',
+                passphrase=model.get('exchange_passphrase'),
+                use_sandbox=bool(model.get('exchange_use_sandbox')),
+                account_type=model.get('exchange_type'),
+                quote_currency=(model.get('exchange_quote_currency') or 'USDT').upper()
+            )
+            client = None
+            try:
+                client = create_exchange_client(credentials)
+                snapshot = client.get_balance_snapshot()
+                available_cash = snapshot.get('available') or snapshot.get('free', 0)
+                portfolio['exchange_balance'] = snapshot
+                portfolio['exchange_available_cash'] = available_cash
+                portfolio['cash'] = min(portfolio.get('cash', available_cash), available_cash)
+            except ExchangeClientError as exc:
+                portfolio['exchange_balance_error'] = str(exc)
+            finally:
+                if client:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+
     account_value = db.get_account_value_history(model_id, limit=100)
     
     return jsonify({
@@ -274,23 +448,11 @@ def execute_trading(model_id):
         model = db.get_model(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
-
-        # Get provider info
-        provider = db.get_provider(model['provider_id'])
-        if not provider:
-            return jsonify({'error': 'Provider not found'}), 404
-
-        trading_engines[model_id] = TradingEngine(
-            model_id=model_id,
-            db=db,
-            market_fetcher=market_fetcher,
-            ai_trader=AITrader(
-                api_key=provider['api_key'],
-                api_url=provider['api_url'],
-                model_name=model['model_name']
-            ),
-            trade_fee_rate=TRADE_FEE_RATE  # 新增：传入费率
-        )
+        try:
+            trading_engines[model_id] = _build_trading_engine(model)
+        except Exception as exc:
+            print(f"[ERROR] Failed to initialize engine for model {model_id}: {exc}")
+            return jsonify({'error': f'Engine initialization failed: {exc}'}), 500
     
     try:
         result = trading_engines[model_id].execute_trading_cycle()
@@ -514,23 +676,12 @@ def init_trading_engines():
             model_name = model['name']
 
             try:
-                # Get provider info
-                provider = db.get_provider(model['provider_id'])
-                if not provider:
-                    print(f"  [WARN] Model {model_id} ({model_name}): Provider not found")
+                detailed_model = db.get_model(model_id)
+                if not detailed_model:
+                    print(f"  [WARN] Model {model_id} ({model_name}): Not found in database")
                     continue
 
-                trading_engines[model_id] = TradingEngine(
-                    model_id=model_id,
-                    db=db,
-                    market_fetcher=market_fetcher,
-                    ai_trader=AITrader(
-                        api_key=provider['api_key'],
-                        api_url=provider['api_url'],
-                        model_name=model['model_name']
-                    ),
-                    trade_fee_rate=TRADE_FEE_RATE
-                )
+                trading_engines[model_id] = _build_trading_engine(detailed_model)
                 print(f"  [OK] Model {model_id} ({model_name})")
             except Exception as e:
                 print(f"  [ERROR] Model {model_id} ({model_name}): {e}")

@@ -15,6 +15,13 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _ensure_column(self, cursor, table: str, column: str, definition: str):
+        """Ensure a column exists in a table, add it if missing."""
+        cursor.execute(f"PRAGMA table_info({table})")
+        columns = {row['name'] for row in cursor.fetchall()}
+        if column not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
     
     def init_db(self):
         """Initialize database tables"""
@@ -45,6 +52,19 @@ class Database:
                 FOREIGN KEY (provider_id) REFERENCES providers(id)
             )
         ''')
+
+        # Ensure extended trading configuration columns exist
+        self._ensure_column(cursor, 'models', 'trading_mode', "TEXT NOT NULL DEFAULT 'manual'")
+        self._ensure_column(cursor, 'models', 'exchange_name', "TEXT")
+        self._ensure_column(cursor, 'models', 'exchange_type', "TEXT")
+        self._ensure_column(cursor, 'models', 'exchange_api_key', "TEXT")
+        self._ensure_column(cursor, 'models', 'exchange_api_secret', "TEXT")
+        self._ensure_column(cursor, 'models', 'exchange_passphrase', "TEXT")
+        self._ensure_column(cursor, 'models', 'exchange_use_sandbox', "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column(cursor, 'models', 'exchange_last_balance', "REAL DEFAULT 0")
+        self._ensure_column(cursor, 'models', 'exchange_last_balance_ts', "TIMESTAMP")
+        self._ensure_column(cursor, 'models', 'exchange_fee_rate', "REAL")
+        self._ensure_column(cursor, 'models', 'exchange_quote_currency', "TEXT DEFAULT 'USDT'")
         
         # Portfolios table
         cursor.execute('''
@@ -186,6 +206,22 @@ class Database:
             SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE model_id = ?
         ''', (model_id,))
         realized_pnl = cursor.fetchone()['total_pnl']
+
+        # Calculate total fees and entry fees separately
+        cursor.execute('''
+            SELECT COALESCE(SUM(fee), 0) as total_fee
+            FROM trades
+            WHERE model_id = ?
+        ''', (model_id,))
+        total_fees = cursor.fetchone()['total_fee']
+
+        cursor.execute('''
+            SELECT COALESCE(SUM(fee), 0) as entry_fee
+            FROM trades
+            WHERE model_id = ?
+              AND signal IN ('buy_to_enter', 'sell_to_enter')
+        ''', (model_id,))
+        entry_fees = cursor.fetchone()['entry_fee']
         
         # Calculate margin used
         margin_used = sum([p['quantity'] * p['avg_price'] / p['leverage'] for p in positions])
@@ -220,13 +256,13 @@ class Database:
                 pos['pnl'] = 0
         
         # Cash = initial capital + realized P&L - margin used
-        cash = initial_capital + realized_pnl - margin_used
+        cash = initial_capital + realized_pnl - margin_used - entry_fees
         
         # Position value = quantity * entry price (not margin!)
         positions_value = sum([p['quantity'] * p['avg_price'] for p in positions])
         
         # Total account value = initial capital + realized P&L + unrealized P&L
-        total_value = initial_capital + realized_pnl + unrealized_pnl
+        total_value = initial_capital + realized_pnl + unrealized_pnl - entry_fees
         
         conn.close()
         
@@ -238,7 +274,9 @@ class Database:
             'margin_used': margin_used,
             'total_value': total_value,
             'realized_pnl': realized_pnl,
-            'unrealized_pnl': unrealized_pnl
+            'unrealized_pnl': unrealized_pnl,
+            'total_fees': total_fees,
+            'entry_fees': entry_fees
         }
     
     def close_position(self, model_id: int, coin: str, side: str = 'long'):
@@ -260,7 +298,7 @@ class Database:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO trades (model_id, coin, signal, quantity, price, leverage, side, pnl, fee)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)  # 新增fee字段
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (model_id, coin, signal, quantity, price, leverage, side, pnl, fee))  # 传入fee值
         conn.commit()
         conn.close()
@@ -521,18 +559,104 @@ class Database:
 
     # ============ Model Management (Updated) ============
 
-    def add_model(self, name: str, provider_id: int, model_name: str, initial_capital: float = 10000) -> int:
+    def add_model(
+        self,
+        name: str,
+        provider_id: int,
+        model_name: str,
+        initial_capital: float = 10000,
+        trading_mode: str = 'manual',
+        exchange_name: Optional[str] = None,
+        exchange_type: Optional[str] = None,
+        exchange_api_key: Optional[str] = None,
+        exchange_api_secret: Optional[str] = None,
+        exchange_passphrase: Optional[str] = None,
+        exchange_use_sandbox: bool = False,
+        exchange_quote_currency: str = 'USDT',
+        exchange_last_balance: Optional[float] = None,
+        exchange_fee_rate: Optional[float] = None
+    ) -> int:
         """Add new trading model"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO models (name, provider_id, model_name, initial_capital)
-            VALUES (?, ?, ?, ?)
-        ''', (name, provider_id, model_name, initial_capital))
+            INSERT INTO models (
+                name,
+                provider_id,
+                model_name,
+                initial_capital,
+                trading_mode,
+                exchange_name,
+                exchange_type,
+                exchange_api_key,
+                exchange_api_secret,
+                exchange_passphrase,
+                exchange_use_sandbox,
+                exchange_quote_currency,
+                exchange_last_balance,
+                exchange_fee_rate
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            name,
+            provider_id,
+            model_name,
+            initial_capital,
+            trading_mode,
+            exchange_name,
+            exchange_type,
+            exchange_api_key,
+            exchange_api_secret,
+            exchange_passphrase,
+            1 if exchange_use_sandbox else 0,
+            exchange_quote_currency,
+            exchange_last_balance,
+            exchange_fee_rate
+        ))
         model_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return model_id
+
+    def update_model_exchange_info(
+        self,
+        model_id: int,
+        *,
+        last_balance: Optional[float] = None,
+        fee_rate: Optional[float] = None,
+        quote_currency: Optional[str] = None
+    ) -> None:
+        """Update exchange-related metadata for a model."""
+        updates = []
+        params = []
+
+        if last_balance is not None:
+            updates.append('exchange_last_balance = ?')
+            params.append(last_balance)
+            updates.append('exchange_last_balance_ts = CURRENT_TIMESTAMP')
+
+        if fee_rate is not None:
+            updates.append('exchange_fee_rate = ?')
+            params.append(fee_rate)
+
+        if quote_currency:
+            updates.append('exchange_quote_currency = ?')
+            params.append(quote_currency)
+
+        if not updates:
+            return
+
+        params.append(model_id)
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f'''
+            UPDATE models
+            SET {', '.join(updates)}
+            WHERE id = ?
+        ''', params)
+        conn.commit()
+        conn.close()
 
     def get_model(self, model_id: int) -> Optional[Dict]:
         """Get model information"""
@@ -561,4 +685,3 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
-

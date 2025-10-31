@@ -715,6 +715,82 @@ body {
     line-height: 1.4;
 }
 
+.hidden {
+    display: none !important;
+}
+
+.radio-group {
+    display: flex;
+    gap: 16px;
+}
+
+.radio-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-bottom: 0;
+    font-weight: 400;
+}
+
+.form-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.form-group.half {
+    flex: 1;
+}
+
+.checkbox-group {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.checkbox-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-bottom: 0;
+    font-weight: 400;
+}
+
+.model-badge {
+    margin-left: 8px;
+    padding: 2px 6px;
+    font-size: 11px;
+    color: var(--primary);
+    background: rgba(51, 112, 255, 0.12);
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.model-badge.exchange {
+    color: #ff7d00;
+    background: rgba(255, 125, 0, 0.15);
+}
+
+.portfolio-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    margin-bottom: 20px;
+    color: var(--text-2);
+    font-size: 13px;
+}
+
+.portfolio-meta span {
+    font-weight: 600;
+    color: var(--text-1);
+}
+
 /* Responsive */
 @media (max-width: 1200px) {
     .stats-grid {
@@ -928,4 +1004,3 @@ body {
 .notes-content::-webkit-scrollbar-thumb:hover {
     background: var(--text-3);
 }
-

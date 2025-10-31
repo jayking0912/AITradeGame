@@ -101,6 +101,11 @@
                     </div>
                 </div>
 
+                <div class="portfolio-meta" id="portfolioMeta">
+                    <div id="feeMeta">累计手续费：<span id="totalFeesValue">$0.00</span></div>
+                    <div id="exchangeMeta" class="hidden">交易所可用余额：<span id="exchangeAvailableValue">$0.00</span></div>
+                </div>
+
                 <!-- Chart -->
                 <div class="content-card">
                     <div class="card-header">
@@ -243,8 +248,73 @@
                     <small class="form-help">用于显示的友好名称</small>
                 </div>
                 <div class="form-group">
-                    <label>初始资金</label>
-                    <input type="number" id="initialCapital" value="100000" class="form-input">
+                    <label>交易模式</label>
+                    <div class="radio-group" id="tradingModeGroup">
+                        <label class="radio-option">
+                            <input type="radio" name="tradingMode" value="manual" checked>
+                            手动配置
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="tradingMode" value="exchange">
+                            交易所账户
+                        </label>
+                    </div>
+                    <small class="form-help">两种模式二选一：手动填写初始资金，或接入交易所读取真实资金与费用。</small>
+                </div>
+
+                <div id="manualFields">
+                    <div class="form-group">
+                        <label>初始资金</label>
+                        <input type="number" id="initialCapital" value="100000" min="0" step="100" class="form-input">
+                        <small class="form-help">单位：USD，AI仅在模拟仓内交易。</small>
+                    </div>
+                </div>
+
+                <div id="exchangeFields" class="hidden">
+                    <div class="form-group">
+                        <label>选择交易所</label>
+                        <select id="exchangeName" class="form-input">
+                            <option value="">请选择交易所</option>
+                            <option value="binance" data-default-type="spot">Binance 现货</option>
+                            <option value="binanceusdm" data-default-type="swap">Binance USDⓈ 合约</option>
+                            <option value="okx" data-default-type="spot">OKX</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>账户类型</label>
+                        <select id="exchangeAccountType" class="form-input">
+                            <option value="spot">现货 / 杠杆</option>
+                            <option value="futures">合约 / 交割合约</option>
+                            <option value="swap">永续合约</option>
+                        </select>
+                        <small class="form-help">用于根据交易所限制自动调整可用杠杆。</small>
+                    </div>
+                    <div class="form-group">
+                        <label>API Key</label>
+                        <input type="text" id="exchangeApiKey" placeholder="请输入交易所 API Key" class="form-input">
+                    </div>
+                    <div class="form-group">
+                        <label>API Secret</label>
+                        <input type="password" id="exchangeApiSecret" placeholder="请输入交易所 API Secret" class="form-input">
+                    </div>
+                    <div class="form-group" id="exchangePassphraseGroup">
+                        <label>Passphrase (OKX)</label>
+                        <input type="password" id="exchangePassphrase" placeholder="OKX 必填，其他可留空" class="form-input">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group half">
+                            <label>计价货币</label>
+                            <input type="text" id="exchangeQuoteCurrency" value="USDT" class="form-input">
+                        </div>
+                        <div class="form-group half checkbox-group">
+                            <label>测试模式</label>
+                            <label class="checkbox-option">
+                                <input type="checkbox" id="exchangeUseSandbox">
+                                启用沙盒/模拟盘
+                            </label>
+                        </div>
+                    </div>
+                    <small class="form-help">程序会实时读取账户余额、手续费与杠杆限制，并同步到交易引擎。</small>
                 </div>
             </div>
             <div class="modal-footer">

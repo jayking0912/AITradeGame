@@ -87,6 +87,10 @@ class TradingApp {
         document.getElementById('cancelBtn').addEventListener('click', () => this.hideModal());
         document.getElementById('submitBtn').addEventListener('click', () => this.submitModel());
         document.getElementById('modelProvider').addEventListener('change', (e) => this.updateModelOptions(e.target.value));
+        document.querySelectorAll('input[name="tradingMode"]').forEach(radio => {
+            radio.addEventListener('change', () => this.toggleTradingMode());
+        });
+        document.getElementById('exchangeName').addEventListener('change', (e) => this.handleExchangeSelection(e.target));
 
         // Refresh
         document.getElementById('refreshBtn').addEventListener('click', () => this.refresh());
@@ -140,18 +144,27 @@ class TradingApp {
         `;
 
         // Add individual models
-        html += models.map(model => `
-            <div class="model-item ${model.id === this.currentModelId && !this.isAggregatedView ? 'active' : ''}"
-                 onclick="app.selectModel(${model.id})">
-                <div class="model-name">${model.name}</div>
-                <div class="model-info">
-                    <span>${model.model_name}</span>
-                    <span class="model-delete" onclick="event.stopPropagation(); app.deleteModel(${model.id})">
-                        <i class="bi bi-trash"></i>
-                    </span>
+        html += models.map(model => {
+            const isActive = model.id === this.currentModelId && !this.isAggregatedView;
+            const isExchange = (model.trading_mode || 'manual').toLowerCase() === 'exchange';
+            const badge = isExchange ? '<span class="model-badge exchange">交易所</span>' : '';
+            const secondaryLabel = isExchange
+                ? (model.exchange_name ? model.exchange_name.toUpperCase() : 'EXCHANGE')
+                : model.model_name;
+
+            return `
+                <div class="model-item ${isActive ? 'active' : ''}"
+                     onclick="app.selectModel(${model.id})">
+                    <div class="model-name">${model.name}${badge}</div>
+                    <div class="model-info">
+                        <span>${secondaryLabel}</span>
+                        <span class="model-delete" onclick="event.stopPropagation(); app.deleteModel(${model.id})">
+                            <i class="bi bi-trash"></i>
+                        </span>
+                    </div>
                 </div>
-            </div>
-        `).join('');
+            `;
+        }).join('');
 
         container.innerHTML = html;
     }
@@ -236,6 +249,24 @@ class TradingApp {
                 el.className = `stat-value ${this.getPnlClass(stats[index].value, stats[index].isPnl)}`;
             }
         });
+
+        const feeValue = document.getElementById('totalFeesValue');
+        if (feeValue) {
+            feeValue.textContent = this.formatPnl(portfolio.total_fees || 0, false);
+        }
+
+        const exchangeMeta = document.getElementById('exchangeMeta');
+        const exchangeValue = document.getElementById('exchangeAvailableValue');
+        if (exchangeMeta && exchangeValue) {
+            const balance = portfolio.exchange_balance;
+            if (balance && (balance.available !== undefined || balance.free !== undefined)) {
+                const available = balance.available ?? balance.free ?? 0;
+                exchangeValue.textContent = this.formatPnl(available, false);
+                exchangeMeta.classList.remove('hidden');
+            } else {
+                exchangeMeta.classList.add('hidden');
+            }
+        }
 
         // Update title for aggregated view
         const titleElement = document.querySelector('.account-info h2');
@@ -830,6 +861,9 @@ class TradingApp {
 
     showModal() {
         this.loadProviders().then(() => {
+            this.clearForm();
+            this.toggleTradingMode();
+            this.handleExchangeSelection(document.getElementById('exchangeName'));
             document.getElementById('addModelModal').classList.add('show');
         });
     }
@@ -838,27 +872,106 @@ class TradingApp {
         document.getElementById('addModelModal').classList.remove('show');
     }
 
+    toggleTradingMode() {
+        const mode = document.querySelector('input[name="tradingMode"]:checked')?.value || 'manual';
+        const manualFields = document.getElementById('manualFields');
+        const exchangeFields = document.getElementById('exchangeFields');
+
+        if (mode === 'exchange') {
+            manualFields.classList.add('hidden');
+            exchangeFields.classList.remove('hidden');
+        } else {
+            manualFields.classList.remove('hidden');
+            exchangeFields.classList.add('hidden');
+        }
+
+        if (mode === 'exchange') {
+            this.handleExchangeSelection(document.getElementById('exchangeName'));
+        }
+    }
+
+    handleExchangeSelection(selectElement) {
+        if (!selectElement) return;
+
+        const selectedOption = selectElement.options[selectElement.selectedIndex];
+        const defaultType = selectedOption?.dataset?.defaultType;
+        const accountTypeSelect = document.getElementById('exchangeAccountType');
+        const passphraseGroup = document.getElementById('exchangePassphraseGroup');
+
+        if (defaultType) {
+            accountTypeSelect.value = defaultType;
+        }
+
+        if (selectElement.value === 'okx') {
+            passphraseGroup.classList.remove('hidden');
+        } else {
+            passphraseGroup.classList.add('hidden');
+        }
+    }
+
     async submitModel() {
         const providerId = document.getElementById('modelProvider').value;
         const modelName = document.getElementById('modelIdentifier').value;
         const displayName = document.getElementById('modelName').value.trim();
         const initialCapital = parseFloat(document.getElementById('initialCapital').value);
+        const tradingMode = document.querySelector('input[name="tradingMode"]:checked')?.value || 'manual';
 
         if (!providerId || !modelName || !displayName) {
             alert('请填写所有必填字段');
             return;
         }
 
+        const payload = {
+            provider_id: providerId,
+            model_name: modelName,
+            name: displayName,
+            trading_mode: tradingMode
+        };
+
+        if (tradingMode === 'manual') {
+            if (Number.isNaN(initialCapital) || initialCapital <= 0) {
+                alert('请填写有效的初始资金金额');
+                return;
+            }
+            payload.initial_capital = initialCapital;
+        } else {
+            const exchangeName = document.getElementById('exchangeName').value;
+            const accountType = document.getElementById('exchangeAccountType').value;
+            const apiKey = document.getElementById('exchangeApiKey').value.trim();
+            const apiSecret = document.getElementById('exchangeApiSecret').value.trim();
+            const passphrase = document.getElementById('exchangePassphrase').value.trim();
+            const quoteCurrency = document.getElementById('exchangeQuoteCurrency').value.trim().toUpperCase() || 'USDT';
+            const useSandbox = document.getElementById('exchangeUseSandbox').checked;
+
+            if (!exchangeName) {
+                alert('请选择交易所');
+                return;
+            }
+            if (!apiKey || !apiSecret) {
+                alert('请填写交易所 API Key 与 Secret');
+                return;
+            }
+            if (exchangeName === 'okx' && !passphrase) {
+                alert('OKX 需要 Passphrase');
+                return;
+            }
+
+            payload.exchange_name = exchangeName;
+            payload.exchange_type = accountType;
+            payload.exchange_api_key = apiKey;
+            payload.exchange_api_secret = apiSecret;
+            payload.exchange_use_sandbox = useSandbox;
+            payload.exchange_quote_currency = quoteCurrency || 'USDT';
+            if (passphrase) {
+                payload.exchange_passphrase = passphrase;
+            }
+        }
+
         try {
             const response = await fetch('/api/models', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    provider_id: providerId,
-                    model_name: modelName,
-                    name: displayName,
-                    initial_capital: initialCapital
-                })
+                body: JSON.stringify(payload)
             });
 
             if (response.ok) {
@@ -898,6 +1011,19 @@ class TradingApp {
         document.getElementById('modelIdentifier').value = '';
         document.getElementById('modelName').value = '';
         document.getElementById('initialCapital').value = '100000';
+        const manualRadio = document.querySelector('input[name="tradingMode"][value="manual"]');
+        if (manualRadio) {
+            manualRadio.checked = true;
+        }
+        document.getElementById('exchangeName').value = '';
+        document.getElementById('exchangeAccountType').value = 'spot';
+        document.getElementById('exchangeApiKey').value = '';
+        document.getElementById('exchangeApiSecret').value = '';
+        document.getElementById('exchangePassphrase').value = '';
+        document.getElementById('exchangeQuoteCurrency').value = 'USDT';
+        document.getElementById('exchangeUseSandbox').checked = false;
+        this.toggleTradingMode();
+        this.handleExchangeSelection(document.getElementById('exchangeName'));
     }
 
     async refresh() {
