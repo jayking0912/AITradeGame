@@ -66,7 +66,7 @@ def _build_trading_engine(model: dict) -> TradingEngine:
         # Persist latest balance snapshot
         try:
             snapshot = exchange_client.get_balance_snapshot()
-            total_balance = snapshot.get('total') or (
+            total_balance = snapshot.get('total_value') or snapshot.get('total') or (
                 (snapshot.get('free') or 0) + (snapshot.get('used') or 0)
             )
             db.update_model_exchange_info(model['id'], last_balance=total_balance)
@@ -218,8 +218,13 @@ def add_model():
 
             try:
                 balance_snapshot = exchange_client.get_balance_snapshot()
-                exchange_last_balance = balance_snapshot.get('total') or (
-                    (balance_snapshot.get('free') or 0) + (balance_snapshot.get('used') or 0)
+                exchange_last_balance = (
+                    balance_snapshot.get('total_value')
+                    or balance_snapshot.get('total')
+                    or (
+                        (balance_snapshot.get('free') or 0)
+                        + (balance_snapshot.get('used') or 0)
+                    )
                 )
                 if exchange_last_balance is not None:
                     initial_capital = float(exchange_last_balance)
@@ -308,10 +313,14 @@ def get_portfolio(model_id):
         if engine and engine.exchange_client:
             try:
                 snapshot = engine.exchange_client.get_balance_snapshot()
-                available_cash = snapshot.get('available') or snapshot.get('free', 0)
+                available_cash = snapshot.get('available', snapshot.get('free', 0.0)) or 0.0
                 portfolio['exchange_balance'] = snapshot
                 portfolio['exchange_available_cash'] = available_cash
-                portfolio['cash'] = min(portfolio.get('cash', available_cash), available_cash)
+                portfolio['cash'] = float(available_cash)
+                total_value = snapshot.get('total_value')
+                if total_value is not None:
+                    portfolio['exchange_total_value'] = float(total_value)
+                    portfolio['total_value'] = float(total_value)
             except ExchangeClientError as exc:
                 portfolio['exchange_balance_error'] = str(exc)
         else:
@@ -329,10 +338,14 @@ def get_portfolio(model_id):
             try:
                 client = create_exchange_client(credentials)
                 snapshot = client.get_balance_snapshot()
-                available_cash = snapshot.get('available') or snapshot.get('free', 0)
+                available_cash = snapshot.get('available', snapshot.get('free', 0.0)) or 0.0
                 portfolio['exchange_balance'] = snapshot
                 portfolio['exchange_available_cash'] = available_cash
-                portfolio['cash'] = min(portfolio.get('cash', available_cash), available_cash)
+                portfolio['cash'] = float(available_cash)
+                total_value = snapshot.get('total_value')
+                if total_value is not None:
+                    portfolio['exchange_total_value'] = float(total_value)
+                    portfolio['total_value'] = float(total_value)
             except ExchangeClientError as exc:
                 portfolio['exchange_balance_error'] = str(exc)
             finally:

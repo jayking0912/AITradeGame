@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple, Any
 
 import ccxt
 
@@ -105,29 +105,41 @@ class ExchangeClient:
     # ------------------------------------------------------------------ #
 
     def get_balance_snapshot(self) -> Dict[str, float]:
-        """Return free/used/total balances for the configured quote currency."""
+        """
+        Return a normalized snapshot of all balances on the exchange account.
+
+        Includes per-asset quantities along with an estimated total value in the
+        configured quote currency.
+        """
         quote = self.credentials.quote_currency.upper()
         try:
             balance = self.exchange.fetch_balance()
         except Exception as exc:
             raise ExchangeClientError(f"Failed to fetch balance: {exc}") from exc
 
-        result = {
-            'free': float(balance.get('free', {}).get(quote, 0.0)),
-            'used': float(balance.get('used', {}).get(quote, 0.0)),
-            'total': float(balance.get('total', {}).get(quote, 0.0)),
+        assets = self._build_asset_balances(balance)
+        quote_entry = next((a for a in assets if a['asset'] == quote), None)
+
+        quote_free = quote_entry['free'] if quote_entry else 0.0
+        quote_used = quote_entry['used'] if quote_entry else 0.0
+        quote_total = quote_entry['total'] if quote_entry else quote_free + quote_used
+
+        total_value, missing_prices = self._attach_asset_values(assets, quote)
+
+        snapshot: Dict[str, Any] = {
+            'quote_currency': quote,
+            'free': quote_free,
+            'used': quote_used,
+            'total': quote_total,
+            'available': quote_free,
+            'assets': assets,
+            'total_value': total_value,
         }
 
-        # Some exchanges report totals only via info field; fallback if necessary
-        if result['total'] == 0 and result['free'] == 0 and result['used'] == 0:
-            info = balance.get(quote) or balance.get(quote.lower()) or {}
-            if isinstance(info, dict):
-                for key in ('total', 'free', 'used'):
-                    if key in info:
-                        result[key] = float(info[key])
+        if missing_prices:
+            snapshot['missing_prices'] = missing_prices
 
-        result['available'] = result['free']
-        return result
+        return snapshot
 
     def get_taker_fee(self, symbol: str) -> float:
         """Get taker fee for the given symbol, fallback to exchange default."""
@@ -198,6 +210,164 @@ class ExchangeClient:
         if candidate in self.exchange.markets:
             return candidate
         return symbol
+
+    # ------------------------------------------------------------------ #
+    # Balance helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _ensure_dict(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _build_asset_balances(self, balance: Dict[str, Any]) -> List[Dict[str, float]]:
+        free_map = self._ensure_dict(balance.get('free'))
+        used_map = self._ensure_dict(balance.get('used'))
+        total_map = self._ensure_dict(balance.get('total'))
+
+        assets = set(free_map.keys()) | set(used_map.keys()) | set(total_map.keys())
+
+        # Fallback for exchanges that only return data in 'info'
+        if not assets:
+            info = balance.get('info', {})
+            if isinstance(info, dict):
+                balances = info.get('balances') or info.get('data')
+                if isinstance(balances, list):
+                    for entry in balances:
+                        asset = entry.get('asset') or entry.get('currency')
+                        if not asset:
+                            continue
+                        asset = str(asset).upper()
+                        free_val = entry.get('free') or entry.get('available') or entry.get('balance')
+                        locked_val = entry.get('locked') or entry.get('hold') or entry.get('frozen') or 0
+                        assets.add(asset)
+                        free_map.setdefault(asset, free_val)
+                        used_map.setdefault(asset, locked_val)
+                        total_map.setdefault(asset, self._coerce_float(free_val) + self._coerce_float(locked_val))
+
+        asset_entries: List[Dict[str, float]] = []
+        for asset in sorted(assets):
+            asset_upper = asset.upper()
+            free_val = self._coerce_float(free_map.get(asset, free_map.get(asset_upper)))
+            used_val = self._coerce_float(used_map.get(asset, used_map.get(asset_upper)))
+            total_val = self._coerce_float(total_map.get(asset, total_map.get(asset_upper)))
+
+            if total_val == 0.0:
+                total_val = free_val + used_val
+
+            if total_val == 0.0 and free_val == 0.0 and used_val == 0.0:
+                continue
+
+            asset_entries.append({
+                'asset': asset_upper,
+                'free': free_val,
+                'used': used_val,
+                'total': total_val,
+            })
+
+        return asset_entries
+
+    def _attach_asset_values(
+        self,
+        assets: List[Dict[str, float]],
+        quote: str,
+    ) -> Tuple[float, List[str]]:
+        total_value = 0.0
+        missing_prices: List[str] = []
+        price_cache: Dict[str, Optional[float]] = {}
+
+        for entry in assets:
+            asset = entry['asset']
+            total_qty = entry['total']
+            if total_qty <= 0:
+                entry['price'] = None
+                entry['value'] = 0.0
+                continue
+
+            price = self._get_price_in_quote(asset, quote, price_cache)
+            entry['price'] = price
+
+            if price is None:
+                entry['value'] = None
+                missing_prices.append(asset)
+                continue
+
+            value = total_qty * price
+            entry['value'] = value
+            total_value += value
+
+        return total_value, missing_prices
+
+    def _get_price_in_quote(
+        self,
+        asset: str,
+        quote: str,
+        cache: Dict[str, Optional[float]],
+    ) -> Optional[float]:
+        if asset == quote:
+            return 1.0
+        if asset in cache:
+            return cache[asset]
+
+        symbol, invert = self._resolve_pricing_symbol(asset, quote)
+        if symbol is None:
+            cache[asset] = None
+            return None
+
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+        except Exception as exc:
+            logger.debug("Ticker fetch failed for %s: %s", symbol, exc)
+            cache[asset] = None
+            return None
+
+        price = (
+            ticker.get('last')
+            or ticker.get('close')
+            or ticker.get('bid')
+            or ticker.get('ask')
+        )
+        try:
+            price_val = float(price)
+        except (TypeError, ValueError):
+            price_val = None
+
+        if not price_val or price_val <= 0:
+            cache[asset] = None
+            return None
+
+        if invert:
+            price_val = 1.0 / price_val if price_val != 0 else None
+
+        cache[asset] = price_val
+        return price_val
+
+    def _resolve_pricing_symbol(self, asset: str, quote: str) -> Tuple[Optional[str], bool]:
+        if asset == quote:
+            return None, False
+
+        direct = self._resolve_symbol(asset)
+        if direct != asset:
+            return direct, False
+
+        inverse_candidates = (
+            f"{quote}/{asset}",
+            f"{quote}-{asset}",
+        )
+
+        for candidate in inverse_candidates:
+            if candidate in getattr(self.exchange, 'markets', {}):
+                return candidate, True
+
+        return None, False
 
     def close(self):
         """Close exchange client if supported."""

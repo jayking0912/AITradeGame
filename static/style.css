@@ -719,6 +719,12 @@ body {
     display: none !important;
 }
 
+.card-note {
+    margin-bottom: 12px;
+    color: var(--text-3);
+    font-size: 12px;
+}
+
 .radio-group {
     display: flex;
     gap: 16px;

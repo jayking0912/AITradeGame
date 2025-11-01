@@ -106,6 +106,32 @@
                     <div id="exchangeMeta" class="hidden">交易所可用余额：<span id="exchangeAvailableValue">$0.00</span></div>
                 </div>
 
+                <div class="content-card hidden" id="exchangeAssetsCard">
+                    <div class="card-header">
+                        <h3 class="card-title">交易所资产</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="card-note hidden" id="exchangeAssetsWarning"></div>
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>资产</th>
+                                        <th>可用</th>
+                                        <th>占用</th>
+                                        <th>总量</th>
+                                        <th id="exchangeAssetPriceHeader">价格</th>
+                                        <th id="exchangeAssetValueHeader">估值</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="exchangeAssetsBody">
+                                    <tr><td colspan="6" class="empty-state">暂无资产数据</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Chart -->
                 <div class="content-card">
                     <div class="card-header">

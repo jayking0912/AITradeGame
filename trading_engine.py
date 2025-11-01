@@ -96,13 +96,15 @@ class TradingEngine:
         try:
             snapshot = self.exchange_client.get_balance_snapshot()
             portfolio['exchange_balance'] = snapshot
-            available_cash = snapshot.get('available') or snapshot.get('free', 0)
-            if available_cash is None:
-                available_cash = 0
+            available_cash = snapshot.get('available', snapshot.get('free', 0.0)) or 0.0
 
-            # Use the lesser of simulated cash and exchange available cash to enforce limits
             portfolio['exchange_available_cash'] = available_cash
-            portfolio['cash'] = min(portfolio.get('cash', available_cash), available_cash)
+            portfolio['cash'] = float(available_cash)
+
+            total_value = snapshot.get('total_value')
+            if total_value is not None:
+                portfolio['exchange_total_value'] = float(total_value)
+                portfolio['total_value'] = float(total_value)
         except ExchangeClientError as exc:
             message = f"[WARN] Exchange balance fetch failed for model {self.model_id}: {exc}"
             print(message)

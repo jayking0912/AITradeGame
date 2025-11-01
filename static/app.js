@@ -59,6 +59,72 @@ class TradingApp {
         return '';
     }
 
+    formatCurrency(value, options = {}) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+            return '-';
+        }
+
+        const {
+            minimumFractionDigits = 2,
+            maximumFractionDigits = 2
+        } = options;
+
+        return `$${numeric.toLocaleString(undefined, {
+            minimumFractionDigits,
+            maximumFractionDigits
+        })}`;
+    }
+
+    formatQuantity(value) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+            return '-';
+        }
+
+        const absValue = Math.abs(numeric);
+        if (absValue === 0) {
+            return '0';
+        }
+        if (absValue >= 1000) {
+            return numeric.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
+        if (absValue >= 1) {
+            return numeric.toFixed(4).replace(/\.?0+$/, '');
+        }
+        return numeric.toFixed(8).replace(/\.?0+$/, '');
+    }
+
+    formatPrice(value) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric) || numeric <= 0) {
+            return '-';
+        }
+
+        if (numeric >= 1000) {
+            return this.formatCurrency(numeric, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+        if (numeric >= 1) {
+            return this.formatCurrency(numeric, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+        }
+        return this.formatCurrency(numeric, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+    }
+
     init() {
         this.initEventListeners();
         this.loadModels();
@@ -261,12 +327,14 @@ class TradingApp {
             const balance = portfolio.exchange_balance;
             if (balance && (balance.available !== undefined || balance.free !== undefined)) {
                 const available = balance.available ?? balance.free ?? 0;
-                exchangeValue.textContent = this.formatPnl(available, false);
+                exchangeValue.textContent = this.formatCurrency(available);
                 exchangeMeta.classList.remove('hidden');
             } else {
                 exchangeMeta.classList.add('hidden');
             }
         }
+
+        this.updateExchangeAssets(isAggregated ? null : (portfolio.exchange_balance || null));
 
         // Update title for aggregated view
         const titleElement = document.querySelector('.account-info h2');
@@ -275,6 +343,75 @@ class TradingApp {
                 titleElement.innerHTML = '<i class="bi bi-bar-chart-fill"></i> 聚合账户总览';
             } else {
                 titleElement.innerHTML = '<i class="bi bi-wallet2"></i> 账户信息';
+            }
+        }
+    }
+
+    updateExchangeAssets(balance) {
+        const card = document.getElementById('exchangeAssetsCard');
+        const tbody = document.getElementById('exchangeAssetsBody');
+        const priceHeader = document.getElementById('exchangeAssetPriceHeader');
+        const valueHeader = document.getElementById('exchangeAssetValueHeader');
+        const warning = document.getElementById('exchangeAssetsWarning');
+
+        if (!card || !tbody) {
+            return;
+        }
+
+        if (!balance || !Array.isArray(balance.assets) || balance.assets.length === 0) {
+            card.classList.add('hidden');
+            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无资产数据</td></tr>';
+            if (warning) {
+                warning.classList.add('hidden');
+                warning.textContent = '';
+            }
+            return;
+        }
+
+        card.classList.remove('hidden');
+
+        const quote = balance.quote_currency || 'USDT';
+        if (priceHeader) {
+            priceHeader.textContent = `价格 (${quote})`;
+        }
+        if (valueHeader) {
+            valueHeader.textContent = `估值 (${quote})`;
+        }
+
+        const rows = balance.assets
+            .filter(asset => asset && typeof asset.asset === 'string')
+            .sort((a, b) => (b.value || 0) - (a.value || 0));
+
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无资产数据</td></tr>';
+        } else {
+            tbody.innerHTML = rows.map(asset => {
+                const priceCell = this.formatPrice(asset.price);
+                const valueCell = asset.value !== null && asset.value !== undefined
+                    ? this.formatCurrency(asset.value, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                    : '-';
+
+                return `
+                    <tr>
+                        <td><strong>${asset.asset}</strong></td>
+                        <td>${this.formatQuantity(asset.free)}</td>
+                        <td>${this.formatQuantity(asset.used)}</td>
+                        <td>${this.formatQuantity(asset.total)}</td>
+                        <td>${priceCell}</td>
+                        <td>${valueCell}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        if (warning) {
+            const missing = Array.isArray(balance.missing_prices) ? balance.missing_prices : [];
+            if (missing.length > 0) {
+                warning.textContent = `以下资产缺少实时估值：${missing.join(', ')}`;
+                warning.classList.remove('hidden');
+            } else {
+                warning.textContent = '';
+                warning.classList.add('hidden');
             }
         }
     }
